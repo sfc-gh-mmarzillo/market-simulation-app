@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="snowflake-source" content="cortex-agent-authored" />
+  <title>Market Strategy Simulation on Snowflake — Architecture</title>
+  <script type="application/json" id="snowflake-report-metadata">
+  {
+    "generated": "2026-11-18",
+    "intent": "One-page customer-facing architecture of the market strategy (starve -> pivot -> adapt) simulation demo for a fictional battery manufacturer, Voltara Energy",
+    "dataSources": [
+      { "type": "file", "path": "setup/10_market_data.sql" },
+      { "type": "file", "path": "setup/11_fit_market_models.sql" },
+      { "type": "file", "path": "setup/strategy_engine.py" },
+      { "type": "file", "path": "setup/12_strategy_engine.sql" },
+      { "type": "file", "path": "setup/13_market_sv_and_policy.sql" },
+      { "type": "file", "path": "setup/14_agent_v3.sql" },
+      { "type": "file", "path": "whatif-sim/streamlit_app.py" },
+      { "type": "query", "warehouse": "AICOLLEGE", "sql": "SELECT LABEL, ADAPT_RULE, CUT_PCT, CUT_MONTHS, HORIZON_MONTHS, MARGIN_DELTA_P50, MARGIN_DELTA_P10, MARGIN_DELTA_P90, PROB_LOSS, PAYBACK_MONTH_P50, PROB_TARGET_EXIT FROM WHATIF_DEMO.SIM.STRATEGY_RESULTS ORDER BY RUN_TS DESC" }
+    ],
+    "sections": [
+      { "id": "question", "title": "The business question" },
+      { "id": "principle", "title": "Design principle" },
+      { "id": "architecture", "title": "Architecture" },
+      { "id": "process", "title": "What happens when you ask the agent", "producerNotes": "Static process flow of the agent, tools and engine." },
+      { "id": "montecarlo", "title": "What the Monte Carlo randomizes" },
+      { "id": "example", "title": "Example result", "producerNotes": "Figures from STRATEGY_RESULTS for the 12% / 6-month Auto aftermarket strategies (36-month horizon) and the cut-depth x duration sweep (24 months), synthetic data." },
+      { "id": "roadmap", "title": "Phased roadmap" }
+    ]
+  }
+  </script>
+  <style>
+    :root { color-scheme: light dark; --accent: #29b5e8; --ink: light-dark(#0f172a, #f1f5f9);
+            --muted: light-dark(#64748b, #94a3b8); --line: light-dark(#e2e8f0, #334155);
+            --card: light-dark(#f8fafc, #111827); }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, system-ui, "Segoe UI", sans-serif; margin: 0 auto; max-width: 1100px; width: 100%;
+           padding: clamp(14px, 3vw, 28px); color: light-dark(#1f2937, #e5e7eb); line-height: 1.45; }
+    h1 { margin: 0; font-size: clamp(22px, 3.2vw, 30px); color: var(--ink); }
+    h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; }
+    .sub { color: var(--muted); margin: 6px 0 0; }
+    .principle { margin-top: 14px; padding: 14px 18px; border-left: 4px solid var(--accent); background: var(--card);
+                 border-radius: 6px; font-size: 15px; }
+    .principle b { color: var(--ink); }
+    .arch { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; align-items: stretch; }
+    .layer { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--card); }
+    .layer h3 { margin: 0 0 4px; font-size: 14px; color: var(--ink); }
+    .tag { font-size: 11px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .05em; }
+    .layer ul { margin: 6px 0 0; padding-left: 16px; font-size: 13px; }
+    code { font-size: 12px; }
+    .flow { text-align: center; color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+    .box { border: 1px solid light-dark(#bae6fd, #0c4a6e); background: light-dark(#f0f9ff, #082f49); border-radius: 10px;
+           padding: 4px 12px 10px; margin-top: 12px; }
+    .box > .tag { display: block; margin: 8px 0; font-weight: 700; letter-spacing: .06em; }
+    .steps { counter-reset: s; list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+    .steps li { counter-increment: s; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 8px 44px;
+                position: relative; font-size: 13px; background: var(--card); }
+    .steps li::before { content: counter(s); position: absolute; left: 12px; top: 8px; width: 22px; height: 22px; border-radius: 50%;
+                        background: var(--accent); color: #fff; font-weight: 700; font-size: 12px; text-align: center; line-height: 22px; }
+    .steps li b { color: var(--ink); }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+    .kpi { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+    .kpi .v { font-size: 21px; font-weight: 700; color: var(--ink); }
+    .kpi .l { font-size: 12px; color: var(--muted); }
+    .phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+    .phase { border-top: 4px solid var(--accent); background: var(--card); border-radius: 6px; padding: 10px 14px; font-size: 13px; }
+    .phase.p2 { border-top-color: #7c3aed; } .phase.p3 { border-top-color: #f59e0b; }
+    .phase h3 { margin: 0 0 4px; font-size: 14px; color: var(--ink); }
+    .now { font-size: 11px; font-weight: 700; color: #16a34a; }
+    .table-wrap { overflow-x: auto; margin: 4px 0; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+    footer { margin-top: 22px; font-size: 12px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>Market strategy simulation on Snowflake</h1>
+  <p class="sub">Cut price to squeeze a competitor → it pivots capacity to other markets → we adapt. Illustrated for a battery
+    manufacturer (demo company: Voltara Energy; synthetic data).</p>
+
+  <h2 id="question">The business question</h2>
+  <p style="margin:0;font-size:14px">“If we cut Auto aftermarket prices to squeeze a low-cost competitor, will it pull out — and if it does,
+    <b>which of our other markets does its capacity flow into</b>, how should we adapt, and does the whole move pay back?”
+    Six application markets: Auto aftermarket · Auto OEM · Commercial / heavy-duty · Marine &amp; powersports · Energy storage /
+    industrial · Other. Competitors: Volt-X Imports (low cost), Apex Power (premium), rest of market.</p>
+
+  <div class="principle" id="principle">
+    <b>The agent designs the strategy and explains it. Code computes every number.</b>
+    The Cortex Agent turns a plain-English question into strategy settings, runs the simulations, checks history and policy, and
+    writes the recommendation. A vectorized Monte Carlo engine on fitted models produces every figure, and every result is stored
+    with its full configuration.
+  </div>
+
+  <h2 id="architecture">Architecture — everything runs inside Snowflake</h2>
+  <div class="arch">
+    <div class="layer"><span class="tag">1 · Data</span><h3>Market history</h3>
+      <ul><li><code>MARKET_HISTORY</code>: monthly units, prices, share, capacity and cost per market × player</li>
+          <li><code>COMPETITOR_MOVES</code>: every past capacity pivot (from → to)</li>
+          <li><code>SQUEEZE_EPISODES</code>: what competitors did after our past cuts</li>
+          <li>Contracts &amp; policy docs, incl. competition-law guardrails</li></ul></div>
+    <div class="layer"><span class="tag">2 · Models (23)</span><h3>Snowpark Python, fitted once</h3>
+      <ul><li>6 market demand (elasticity ± SE, growth, seasonality)</li>
+          <li>6 share response (price and competitor capacity)</li>
+          <li>3 competitor cost / price-follow</li>
+          <li>3 <b>pivot hazard</b> (P(move capacity out) vs margin squeeze)</li>
+          <li>3 <b>destination choice</b> (where the capacity goes)</li>
+          <li>Minor competitor price cuts · LME lead price</li></ul></div>
+    <div class="layer"><span class="tag">3 · Strategy engine</span><h3>Python stored procedures</h3>
+      <ul><li><code>RUN_STRATEGY</code>: monthly multi-phase Monte Carlo (cut → pivots → adaptation rule)</li>
+          <li><code>RUN_STRATEGY_SWEEP</code>: cut depth × duration grid</li>
+          <li>Same random draws for strategy vs no-strategy baseline</li>
+          <li>About 10 s per strategy (5,000 paths × 24–36 months)</li></ul></div>
+    <div class="layer"><span class="tag">4 · Results</span><h3><code>STRATEGY_RESULTS</code></h3>
+      <ul><li>Cumulative margin path, payback, P(loss)</li>
+          <li>Capacity flow matrix between markets</li>
+          <li>Results by market; competitor capacity over time</li>
+          <li>Full config and model-parameter snapshot per run</li></ul></div>
+    <div class="layer"><span class="tag">5 · Experience</span><h3>Streamlit app</h3>
+      <ul><li>Ask the agent (chat + inline charts)</li>
+          <li>Scenarios: each agent-built strategy with its configuration, a Sankey-style flow chart, and margin and capacity plots</li>
+          <li>Model &amp; assumptions card</li></ul></div>
+  </div>
+
+  <div class="box">
+    <span class="tag">CORTEX AGENT <code>WHATIF_AGENT</code> — THE ONLY WAY SCENARIOS ARE CREATED</span>
+    <div class="arch">
+      <div class="layer"><h3>run_strategy / run_strategy_sweep</h3><ul><li>Builds and runs 2–3 strategy options, or a sweep of cut depth × duration</li></ul></div>
+      <div class="layer"><h3>explain_strategy</h3><ul><li>Driver attribution plus stress tests: no pivots, competitor forced into each destination, lead +20%</li></ul></div>
+      <div class="layer"><h3>find_squeeze_precedents · market_outlook</h3><ul><li>What competitors really did after past cuts; market size, shares and capacity</li></ul></div>
+      <div class="layer"><h3>describe_model · Analyst · Search</h3><ul><li>Model card; Cortex Analyst on <code>MARKET_SV</code>; Cortex Search on contracts and policy (competition-law guardrails)</li></ul></div>
+    </div>
+  </div>
+
+  <h2 id="process">What happens when you ask the agent</h2>
+  <ol class="steps">
+    <li><b>You ask</b> in the app, e.g. “Cut aftermarket 12% for 6 months to squeeze Volt-X — where does it go and how should we adapt?” The app calls the agent through its own Snowflake session.</li>
+    <li><b>The agent plans</b> and turns the question into strategy settings: target market and competitor, cut depth and duration, adaptation rule (restore after N months / restore once the competitor exits / hold / follow it into its new market) and horizon.</li>
+    <li><b>The engine simulates</b> 5,000 monthly paths per option. Our price follows the strategy, competitors partly match it, their margin is squeezed, and in each path they may start pivoting capacity to another market. Shares, demand and margin are recomputed every month, and the same paths are rerun with no strategy as the baseline.</li>
+    <li><b>The agent grounds the result:</b> past squeeze episodes (what Volt-X actually did), the market outlook for the target and destination markets, and policy search, which flags Legal review for cuts deeper than 15% or longer than 6 months.</li>
+    <li><b>The agent answers</b> using only tool numbers: payback, P(loss), where capacity flows, market-by-market impact, and a recommendation framed as a proposal for approval.</li>
+    <li><b>The app renders</b> every scenario the agent ran on the Scenarios tab: its configuration, a flow chart, cumulative margin, volume shift by market, and competitor capacity over time.</li>
+  </ol>
+
+  <h2 id="montecarlo">What the Monte Carlo randomizes (each can be switched off; all off ⇒ P10 = P90)</h2>
+  <div class="two">
+    <div class="table-wrap"><table>
+      <thead><tr><th>Randomized per path</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td><b>Whether and when</b> a squeezed competitor starts pivoting</td><td>Pivot hazard model, coefficient ± SE, monthly draw</td></tr>
+        <tr><td><b>Where</b> its capacity goes, and how much</td><td>Destination-choice model; fitted pivot size</td></tr>
+        <tr><td>Competitor unit cost (how hard the squeeze bites)</td><td>Observed cost per market ± spread</td></tr>
+        <tr><td>Market demand elasticity and growth</td><td>Market demand models ± SE</td></tr>
+        <tr><td>Our share response to price and competitor capacity</td><td>Share models ± SE</td></tr>
+        <tr><td>Minor competitor price cuts</td><td>Fitted frequency and size</td></tr>
+        <tr><td>LME lead price path · unexplained demand noise</td><td>GBM · residual spread</td></tr>
+      </tbody></table></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Held fixed / rules</th></tr></thead>
+      <tbody>
+        <tr><td>Our price follows the chosen strategy and adaptation rule (it reacts to the competitor’s exit within each path)</td></tr>
+        <tr><td>Competitors follow our price with their fitted price-follow ratio</td></tr>
+        <tr><td>One pivot per competitor per market; capacity ramps out over months and returns slowly once margins recover</td></tr>
+        <tr><td>Current market sizes, shares and capacity are the starting point</td></tr>
+        <tr><td>Baseline = same random draws, no strategy</td></tr>
+      </tbody></table></div>
+  </div>
+
+  <h2 id="example">Example result (synthetic data)</h2>
+  <div class="kpis">
+    <div class="kpi"><div class="v">+$11.0M</div><div class="l">median margin vs baseline over 36 mo for a 12% / 6-month aftermarket cut (P10 −$10.1M, P90 +$45.5M)</div></div>
+    <div class="kpi"><div class="v">29%</div><div class="l">chance it loses money: above the 25% policy limit, so it needs a mitigation plan</div></div>
+    <div class="kpi"><div class="v">84–88%</div><div class="l">chance Volt-X pulls out of aftermarket; its capacity flows mainly into <b>Energy storage</b></div></div>
+    <div class="kpi"><div class="v">20% × 3 mo</div><div class="l">best strategy within the risk limit in the sweep (+$12.2M P50 over 24 mo, 22% P(loss)), but it needs Legal review because it is deeper than 15%</div></div>
+  </div>
+  <p class="flow">The trade-off the demo shows: we win share where the competitor leaves, and lose margin in the market it moves into.</p>
+
+  <h2 id="roadmap">Phased roadmap</h2>
+  <div class="phases">
+    <div class="phase"><span class="now">BUILT</span><h3>Phase 1 · Models + Monte Carlo</h3>Market, share, competitor cost, pivot and destination models; multi-phase strategy engine running in seconds inside Snowflake.</div>
+    <div class="phase p2"><span class="now">BUILT</span><h3>Phase 2 · Agent-built scenarios</h3>Cortex Agent creates, runs, sweeps, stress-tests and explains strategies, grounded in past episodes and policy, with flow and outcome visuals for every run.</div>
+    <div class="phase p3"><h3>Phase 3 · Autonomous &amp; governed</h3>Scheduled market watcher (competitor capacity, lead price, demand); decision memo with human approval and an audit log; our own capacity redeployment as a second lever.</div>
+  </div>
+
+  <footer>Demo built on synthetic data in Snowflake (WHATIF_DEMO.SIM). Company, competitors and figures are illustrative.</footer>
+</body>
+</html>
